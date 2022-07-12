@@ -10,22 +10,31 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
-	"strings"
 	"time"
 )
 
 type Config struct {
-	Token      string            `json:"token"`
-	Timeout    time.Duration     `json:"connection_timeout"`
-	Shell      string            `json:"shell"`
-	WorkDir    string            `json:"work_dir"`
-	JobTimeout time.Duration     `json:"timeout_between_jobs"`
-	Merge      bool              `json:"merge"`
-	Env        map[string]string `json:"env"`
+	Token string
+
+	ConnectionTimeout  time.Duration
+	TimeoutBetweenJobs time.Duration
+
+	Shell   string
+	WorkDir string
+
+	DoMerge   bool
+	Protected bool
+	Env       map[string]string
+
+	Jobs []ConfigJob
 }
 
-type Register struct {
-	Token string
+type ConfigJob struct {
+	ProjectID    string
+	JobName      string
+	BeforeScript []string
+	Script       []string
+	AfterScript  []string
 }
 
 type Job struct {
@@ -68,11 +77,15 @@ type State struct {
 	ExitCode int    `json:"exit_code,omitempty"`
 }
 
+type APIError string
+
 var config Config
 var client http.Client
 
 var jobID string
 var jobToken string
+
+var projID string
 var projDir string
 
 func main() {
@@ -98,11 +111,9 @@ func main() {
 		printErr(err.Error())
 	}
 
-	client.Timeout = time.Second * config.Timeout
+	client.Timeout = time.Second * config.ConnectionTimeout
 
 	var job *Job
-	var state *State
-	var trace *bytes.Buffer
 
 	f, _ = os.Open(config.WorkDir + "/job.json")
 	if f != nil {
@@ -118,6 +129,9 @@ func main() {
 		os.Setenv(key, val)
 	}
 
+	var state State
+	var trace bytes.Buffer
+
 	for {
 		job = requestJob(job, config.Token)
 		if job == nil {
@@ -126,39 +140,56 @@ func main() {
 
 		jobID = string(job.ID)
 		jobToken = job.Token
-		projDir = config.WorkDir + "/" + string(job.JobInfo.ProjectID)
 
-		state = &State{Token: jobToken, State: "success", ExitCode: 0}
-		trace = new(bytes.Buffer)
-		err = handleJob(job, trace)
+		projID = string(job.JobInfo.ProjectID)
+		projDir = config.WorkDir + "/" + projID
+
+		state.Token = jobToken
+		state.State = "success"
+		state.ExitCode = 0
+
+		err = handleJob(job, &trace)
 		job = nil
 
 		if err != nil {
 			state.State = "failed"
-			if err, ok := err.(*exec.ExitError); ok {
+			switch err := err.(type) {
+			case *exec.ExitError:
 				state.ExitCode = err.ExitCode()
 				state.Failure = "script_failure"
-			} else {
-				state.ExitCode = 1
+
+			case APIError:
+				state.ExitCode = 127
+				state.Failure = "api_failure"
+
+			default:
+				state.ExitCode = 128
 				state.Failure = "runner_system_failure"
 			}
 		}
 
-		sendTrace(trace)
-		updateJob(state)
+		sendTrace(&trace)
+		updateJob(&state)
 
-		if config.JobTimeout > 0 {
-			time.Sleep(time.Second * config.JobTimeout)
+		trace.Reset()
+
+		if config.TimeoutBetweenJobs > 0 {
+			time.Sleep(time.Second * config.TimeoutBetweenJobs)
 		}
 	}
 
 	os.Remove(config.WorkDir + "/job.json")
 }
 
+func (api APIError) Error() string {
+	return string(api)
+}
+
 func registerRunner(homeDir string) {
 
-	var token = ""
 	println("Input the GitLab token and press [ENTER]")
+
+	var token string
 	var n, _ = fmt.Scanln(&token)
 	if n <= 0 {
 		printErr("Cancelled")
@@ -171,11 +202,15 @@ func registerRunner(homeDir string) {
 	}
 	defer f.Close()
 
-	config.Timeout = 5
+	config.ConnectionTimeout = 5
+	config.TimeoutBetweenJobs = 1
+
 	config.Shell = "sh"
 	config.WorkDir = homeDir + "/.ci"
-	config.JobTimeout = 1
-	config.Merge = true
+
+	config.DoMerge = true
+	config.Jobs = []ConfigJob{{JobName: "test-job", BeforeScript: []string{}, Script: []string{}, AfterScript: []string{}}}
+
 	client.Timeout = time.Second * 5
 
 	var res *http.Response
@@ -190,8 +225,11 @@ func registerRunner(homeDir string) {
 		printErr(res.Status)
 	}
 
-	var register = new(Register)
-	err = json.NewDecoder(res.Body).Decode(register)
+	var register struct {
+		Token string
+	}
+
+	err = json.NewDecoder(res.Body).Decode(&register)
 	res.Body.Close()
 
 	if err != nil {
@@ -305,22 +343,49 @@ func sendTrace(trace io.Reader) bool {
 	return true
 }
 
+func getConfigJob(job *Job) ([]string, []string, []string, bool) {
+
+	for _, val := range config.Jobs {
+
+		if val.JobName != job.JobInfo.Name {
+			continue
+		}
+
+		if val.ProjectID != "" && val.ProjectID != projID {
+			continue
+		}
+
+		return val.BeforeScript, val.Script, val.AfterScript, true
+	}
+
+	return nil, nil, nil, false
+}
+
 func handleJob(job *Job, trace io.Writer) error {
 
-	os.MkdirAll(config.WorkDir, 0755)
+	var before, script, after, protected = getConfigJob(job)
+	if !protected && config.Protected {
+		return APIError("")
+	}
 
 	var err error
+	if err = os.MkdirAll(config.WorkDir, 0755); err != nil {
+		return err
+	}
+
 	if err = os.Mkdir(projDir, 0755); err != nil && !os.IsExist(err) {
 		return err
 	}
 
 	var targetName, oldTarget, sourceID string
-	var isMerge = config.Merge && job.GitInfo.BeforeSha == "0000000000000000000000000000000000000000"
+	var isMerge = config.DoMerge && job.GitInfo.BeforeSha == "0000000000000000000000000000000000000000"
 
 	for _, val := range job.Variables {
+
 		if val.Public {
 			os.Setenv(val.Key, val.Value)
 		}
+
 		if isMerge {
 			if val.Key == "CI_MERGE_REQUEST_TARGET_BRANCH_NAME" {
 				targetName = val.Value
@@ -405,24 +470,18 @@ func handleJob(job *Job, trace io.Writer) error {
 		}
 	}
 
-	var before []string
-	var script []string
-	var after []string
+	if !protected {
+		for _, val := range job.Steps {
 
-	for _, val := range job.Steps {
+			if val.Name == "before_script" {
+				before = val.Script
 
-		if val.Name == "before_script" {
-			before = val.Script
-			continue
-		}
+			} else if val.Name == "script" {
+				script = val.Script
 
-		if val.Name == "script" {
-			script = val.Script
-			continue
-		}
-
-		if val.Name == "after_script" {
-			after = val.Script
+			} else if val.Name == "after_script" {
+				after = val.Script
+			}
 		}
 	}
 
@@ -449,11 +508,15 @@ func handleJob(job *Job, trace io.Writer) error {
 	return err
 }
 
-func handleScript(data []string, trace io.Writer) error {
+func handleScript(script []string, trace io.Writer) error {
 
-	var r = strings.NewReader(strings.Join(data, "\n"))
+	var data bytes.Buffer
+	for _, val := range script {
+		data.WriteString(val + "\n")
+	}
+
 	var cmd = exec.Command(config.Shell)
-	cmd.Stdin = r
+	cmd.Stdin = &data
 	cmd.Stdout = trace
 	cmd.Stderr = trace
 	cmd.Dir = projDir
