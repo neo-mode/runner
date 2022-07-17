@@ -79,6 +79,8 @@ type State struct {
 
 type APIError string
 
+const origin = "refs/remotes/origin/"
+
 var config Config
 var client http.Client
 
@@ -377,7 +379,7 @@ func handleJob(job *Job, trace io.Writer) error {
 		return err
 	}
 
-	var targetName, oldTarget, sourceID string
+	var targetName, oldTargetSHA, mergeID string
 	var isMerge = config.DoMerge && job.GitInfo.BeforeSha == "0000000000000000000000000000000000000000"
 
 	for _, val := range job.Variables {
@@ -390,7 +392,7 @@ func handleJob(job *Job, trace io.Writer) error {
 			if val.Key == "CI_MERGE_REQUEST_TARGET_BRANCH_NAME" {
 				targetName = val.Value
 			} else if val.Key == "CI_MERGE_REQUEST_IID" {
-				sourceID = val.Value
+				mergeID = val.Value
 			}
 		}
 	}
@@ -406,7 +408,7 @@ func handleJob(job *Job, trace io.Writer) error {
 		var offset = 2
 		if isMerge {
 			offset++
-			oldTarget = getRefSHA(targetName)
+			oldTargetSHA = getRefSHA(origin + targetName)
 		}
 
 		var args = make([]string, len(job.GitInfo.Refspecs)+offset)
@@ -428,23 +430,26 @@ func handleJob(job *Job, trace io.Writer) error {
 
 	if isMerge {
 
-		var target = getRefSHA(targetName)
-		if target == oldTarget {
+		var targetSHA = getRefSHA(origin + targetName)
+		if targetSHA == oldTargetSHA {
 
-			if err = git("checkout", targetName+"/"+sourceID); err != nil {
-				if err = git("checkout", target); err != nil {
-					return err
-				}
+			var mergedSHA = getMergedSHA(targetName, mergeID)
+			if mergedSHA != "" {
+				targetSHA = mergedSHA
+			}
+
+			if err = git("checkout", targetSHA); err != nil {
+				return err
 			}
 
 		} else {
 
-			if oldTarget != "" {
-				os.RemoveAll(projDir + "/.git/refs/" + targetName)
+			if oldTargetSHA != "" {
+				os.RemoveAll(projDir + "/.git/refs/merged/" + targetName)
 			}
 
-			if targetName != target {
-				if err = git("checkout", target); err != nil {
+			if targetName != targetSHA {
+				if err = git("checkout", targetSHA); err != nil {
 					return err
 				}
 			}
@@ -460,6 +465,7 @@ func handleJob(job *Job, trace io.Writer) error {
 		}
 
 		if string(data[:19]) == "Already up to date." {
+			println("cached")
 			return nil
 		}
 
@@ -500,7 +506,7 @@ func handleJob(job *Job, trace io.Writer) error {
 	}
 
 	if isMerge && err == nil {
-		if err = git("update-ref", "refs/"+targetName+"/"+sourceID, "HEAD"); err != nil {
+		if err = setMergedSHA(targetName, mergeID, getRefSHA("HEAD")); err != nil {
 			return err
 		}
 	}
@@ -525,9 +531,28 @@ func handleScript(script []string, trace io.Writer) error {
 
 func getRefSHA(target string) string {
 
-	var f, _ = os.Open(projDir + "/.git/refs/remotes/origin/" + target)
+	var f, _ = os.Open(projDir + "/.git/" + target)
 	if f == nil {
 		return target
+	}
+
+	var data = make([]byte, 100)
+	f.Read(data)
+	f.Close()
+
+	var _data = string(data)
+	if _data[:5] == "ref: " {
+		return getRefSHA(_data[5 : len(_data)-6])
+	}
+
+	return _data
+}
+
+func getMergedSHA(targetName, source string) string {
+
+	var f, _ = os.Open(projDir + "/.git/refs/merged/" + targetName + "/" + source)
+	if f == nil {
+		return ""
 	}
 
 	var data = make([]byte, 32)
@@ -535,6 +560,26 @@ func getRefSHA(target string) string {
 	f.Close()
 
 	return string(data)
+}
+
+func setMergedSHA(targetName, source, value string) error {
+
+	var err error
+	targetName = projDir + "/.git/refs/merged/" + targetName
+	if err = os.MkdirAll(targetName, 0755); err != nil {
+		return err
+	}
+
+	var f *os.File
+	f, err = os.OpenFile(targetName+"/"+source, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+
+	f.WriteString(value)
+	f.Close()
+
+	return nil
 }
 
 func git(args ...string) error {
