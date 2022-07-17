@@ -465,7 +465,6 @@ func handleJob(job *Job, trace io.Writer) error {
 		}
 
 		if string(data[:19]) == "Already up to date." {
-			println("cached")
 			return nil
 		}
 
