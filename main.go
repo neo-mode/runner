@@ -22,9 +22,9 @@ type Config struct {
 	Shell   string
 	WorkDir string
 
-	DoMerge   bool
-	Protected bool
-	Env       map[string]string
+	DoMerge    bool
+	Protection bool
+	Env        map[string]string
 
 	Jobs []ConfigJob
 }
@@ -53,10 +53,9 @@ type JobInfo struct {
 }
 
 type GitInfo struct {
-	RepoURL   string `json:"repo_url"`
-	Sha       string
-	BeforeSha string `json:"before_sha"`
-	Refspecs  []string
+	RepoURL  string `json:"repo_url"`
+	Sha      string
+	Refspecs []string
 }
 
 type Variable struct {
@@ -79,7 +78,7 @@ type State struct {
 
 type APIError string
 
-const origin = "refs/remotes/origin/"
+const origin = "origin/"
 
 var config Config
 var client http.Client
@@ -314,7 +313,6 @@ func updateJob(state *State) {
 
 	if res.StatusCode != 200 {
 		os.Remove(config.WorkDir + "/job.json")
-		printErr(res.Status)
 	}
 }
 
@@ -348,16 +346,9 @@ func sendTrace(trace io.Reader) bool {
 func getConfigJob(job *Job) ([]string, []string, []string, bool) {
 
 	for _, val := range config.Jobs {
-
-		if val.JobName != job.JobInfo.Name {
-			continue
+		if (val.ProjectID == "" || val.ProjectID == projID) && val.JobName == job.JobInfo.Name {
+			return val.BeforeScript, val.Script, val.AfterScript, true
 		}
-
-		if val.ProjectID != "" && val.ProjectID != projID {
-			continue
-		}
-
-		return val.BeforeScript, val.Script, val.AfterScript, true
 	}
 
 	return nil, nil, nil, false
@@ -365,8 +356,8 @@ func getConfigJob(job *Job) ([]string, []string, []string, bool) {
 
 func handleJob(job *Job, trace io.Writer) error {
 
-	var before, script, after, protected = getConfigJob(job)
-	if !protected && config.Protected {
+	var before, script, after, found = getConfigJob(job)
+	if !found && config.Protection {
 		return APIError("")
 	}
 
@@ -379,8 +370,8 @@ func handleJob(job *Job, trace io.Writer) error {
 		return err
 	}
 
-	var targetName, oldTargetSHA, mergeID string
-	var isMerge = config.DoMerge && job.GitInfo.BeforeSha == "0000000000000000000000000000000000000000"
+	var targetName, oldTarget, mergeID string
+	var isMerge = config.DoMerge
 
 	for _, val := range job.Variables {
 
@@ -397,6 +388,10 @@ func handleJob(job *Job, trace io.Writer) error {
 		}
 	}
 
+	if isMerge && targetName == "" {
+		isMerge = false
+	}
+
 	if err == nil {
 
 		if err = git("clone", job.GitInfo.RepoURL, "."); err != nil {
@@ -408,7 +403,7 @@ func handleJob(job *Job, trace io.Writer) error {
 		var offset = 2
 		if isMerge {
 			offset++
-			oldTargetSHA = getRefSHA(origin + targetName)
+			oldTarget = getTarget(targetName)
 		}
 
 		var args = make([]string, len(job.GitInfo.Refspecs)+offset)
@@ -430,29 +425,15 @@ func handleJob(job *Job, trace io.Writer) error {
 
 	if isMerge {
 
-		var targetSHA = getRefSHA(origin + targetName)
-		if targetSHA == oldTargetSHA {
-
-			var mergedSHA = getMergedSHA(targetName, mergeID)
-			if mergedSHA != "" {
-				targetSHA = mergedSHA
-			}
-
-			if err = git("checkout", targetSHA); err != nil {
-				return err
-			}
-
+		var target = getTarget(targetName)
+		if target == oldTarget {
+			target = getMergedTarget(targetName, mergeID)
 		} else {
+			os.RemoveAll(projDir + "/.git/refs/merged/" + targetName)
+		}
 
-			if oldTargetSHA != "" {
-				os.RemoveAll(projDir + "/.git/refs/merged/" + targetName)
-			}
-
-			if targetName != targetSHA {
-				if err = git("checkout", targetSHA); err != nil {
-					return err
-				}
-			}
+		if err = git("checkout", target); err != nil {
+			return err
 		}
 
 		var cmd = exec.Command("git", "merge", job.GitInfo.Sha)
@@ -461,21 +442,19 @@ func handleJob(job *Job, trace io.Writer) error {
 
 		if err != nil {
 			git("reset", "--merge")
-			return err
+			return APIError("")
 		}
 
-		if string(data[:19]) == "Already up to date." {
+		var _data = string(data)
+		if _data == "Already up to date.\n" || _data == "Merge made by the 'recursive' strategy.\n" {
 			return nil
 		}
 
-	} else {
-
-		if err = git("checkout", job.GitInfo.Sha); err != nil {
-			return err
-		}
+	} else if err = git("checkout", job.GitInfo.Sha); err != nil {
+		return err
 	}
 
-	if !protected {
+	if !found {
 		for _, val := range job.Steps {
 
 			if val.Name == "before_script" {
@@ -505,9 +484,7 @@ func handleJob(job *Job, trace io.Writer) error {
 	}
 
 	if isMerge && err == nil {
-		if err = setMergedSHA(targetName, mergeID, getRefSHA("HEAD")); err != nil {
-			return err
-		}
+		setMergedTarget(targetName, mergeID)
 	}
 
 	return err
@@ -528,28 +505,9 @@ func handleScript(script []string, trace io.Writer) error {
 	return cmd.Run()
 }
 
-func getRefSHA(target string) string {
+func getTarget(target string) string {
 
-	var f, _ = os.Open(projDir + "/.git/" + target)
-	if f == nil {
-		return target
-	}
-
-	var data = make([]byte, 100)
-	f.Read(data)
-	f.Close()
-
-	var _data = string(data)
-	if _data[:5] == "ref: " {
-		return getRefSHA(_data[5 : len(_data)-6])
-	}
-
-	return _data
-}
-
-func getMergedSHA(targetName, source string) string {
-
-	var f, _ = os.Open(projDir + "/.git/refs/merged/" + targetName + "/" + source)
+	var f, _ = os.Open(projDir + "/.git/refs/remotes/" + origin + target)
 	if f == nil {
 		return ""
 	}
@@ -561,22 +519,43 @@ func getMergedSHA(targetName, source string) string {
 	return string(data)
 }
 
-func setMergedSHA(targetName, source, value string) error {
+func getMergedTarget(targetName, source string) string {
 
-	var err error
+	var f, _ = os.Open(projDir + "/.git/refs/merged/" + targetName + "/" + source)
+	if f == nil {
+		return origin + targetName
+	}
+
+	var data = make([]byte, 32)
+	f.Read(data)
+	f.Close()
+
+	return string(data)
+}
+
+func setMergedTarget(targetName, source string) error {
+
+	var src, err = os.Open(projDir + "/.git/HEAD")
+	if src == nil {
+		return err
+	}
+
 	targetName = projDir + "/.git/refs/merged/" + targetName
 	if err = os.MkdirAll(targetName, 0755); err != nil {
+		src.Close()
 		return err
 	}
 
-	var f *os.File
-	f, err = os.OpenFile(targetName+"/"+source, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	var dst *os.File
+	dst, err = os.OpenFile(targetName+"/"+source, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
 	if err != nil {
+		src.Close()
 		return err
 	}
 
-	f.WriteString(value)
-	f.Close()
+	io.Copy(dst, src)
+	src.Close()
+	dst.Close()
 
 	return nil
 }
