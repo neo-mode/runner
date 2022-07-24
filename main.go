@@ -310,10 +310,6 @@ func updateJob(state *State) {
 
 	io.Copy(io.Discard, req.Body)
 	res.Body.Close()
-
-	if res.StatusCode != 200 {
-		os.Remove(config.WorkDir + "/job.json")
-	}
 }
 
 func sendTrace(trace io.Reader) bool {
