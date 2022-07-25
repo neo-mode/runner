@@ -366,7 +366,7 @@ func handleJob(job *Job, trace io.Writer) error {
 		return err
 	}
 
-	var targetName, oldTarget, mergeID string
+	var targetName, sourceName, oldTarget, mergeID string
 	var isMerge = config.DoMerge
 
 	for _, val := range job.Variables {
@@ -378,6 +378,10 @@ func handleJob(job *Job, trace io.Writer) error {
 		if isMerge {
 			if val.Key == "CI_MERGE_REQUEST_TARGET_BRANCH_NAME" {
 				targetName = val.Value
+
+			} else if val.Key == "CI_MERGE_REQUEST_SOURCE_BRANCH_NAME" {
+				sourceName = val.Value
+
 			} else if val.Key == "CI_MERGE_REQUEST_IID" {
 				mergeID = val.Value
 			}
@@ -396,22 +400,17 @@ func handleJob(job *Job, trace io.Writer) error {
 
 	} else {
 
-		var offset = 2
+		var args []string
 		if isMerge {
-			offset++
 			oldTarget = getTarget(targetName)
-		}
-
-		var args = make([]string, len(job.GitInfo.Refspecs)+offset)
-		args[0] = "fetch"
-		args[1] = job.GitInfo.RepoURL
-
-		if isMerge {
-			args[2] = targetName
-		}
-
-		for key, val := range job.GitInfo.Refspecs {
-			args[key+offset] = val
+			args = []string{"fetch", job.GitInfo.RepoURL, "+" + targetName + ":refs/remotes/" + origin + targetName, "+" + sourceName + ":refs/remotes/" + origin + sourceName}
+		} else {
+			args = make([]string, len(job.GitInfo.Refspecs)+2)
+			args[0] = "fetch"
+			args[1] = job.GitInfo.RepoURL
+			for key, val := range job.GitInfo.Refspecs {
+				args[key+2] = val
+			}
 		}
 
 		if err = git(args...); err != nil {
@@ -432,7 +431,7 @@ func handleJob(job *Job, trace io.Writer) error {
 			return err
 		}
 
-		var cmd = exec.Command("git", "merge", job.GitInfo.Sha)
+		var cmd = exec.Command("git", "merge", origin+sourceName)
 		cmd.Dir = projDir
 		var data, err = cmd.Output()
 
