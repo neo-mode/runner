@@ -78,6 +78,7 @@ type State struct {
 
 type APIError string
 
+const refsRemotes = "refs/remotes/"
 const origin = "origin/"
 
 var config Config
@@ -403,7 +404,7 @@ func handleJob(job *Job, trace io.Writer) error {
 		var args []string
 		if isMerge {
 			oldTarget = getTarget(targetName)
-			args = []string{"fetch", job.GitInfo.RepoURL, "+" + targetName + ":refs/remotes/" + origin + targetName, "+" + sourceName + ":refs/remotes/" + origin + sourceName}
+			args = []string{"fetch", job.GitInfo.RepoURL, "+" + targetName + ":" + refsRemotes + origin + targetName, "+" + sourceName + ":" + refsRemotes + origin + sourceName}
 		} else {
 			args = make([]string, len(job.GitInfo.Refspecs)+2)
 			args[0] = "fetch"
@@ -502,7 +503,7 @@ func handleScript(script []string, trace io.Writer) error {
 
 func getTarget(target string) string {
 
-	var f, _ = os.Open(projDir + "/.git/refs/remotes/" + origin + target)
+	var f, _ = os.Open(projDir + "/.git/" + refsRemotes + origin + target)
 	if f == nil {
 		return ""
 	}
