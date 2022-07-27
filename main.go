@@ -397,26 +397,30 @@ func handleJob(job *Job, trace io.Writer) error {
 	if err == nil {
 
 		if err = git("clone", job.GitInfo.RepoURL, "."); err != nil {
-			return err
+			return APIError("")
 		}
 
 	} else {
 
 		var args []string
 		if isMerge {
+
 			oldTarget = getTarget(targetName)
 			args = []string{"fetch", job.GitInfo.RepoURL, "+" + targetName + ":" + refsRemotes + origin + targetName, "+" + sourceName + ":" + refsRemotes + origin + sourceName}
+
 		} else {
+
 			args = make([]string, len(job.GitInfo.Refspecs)+2)
 			args[0] = "fetch"
 			args[1] = job.GitInfo.RepoURL
+
 			for key, val := range job.GitInfo.Refspecs {
 				args[key+2] = val
 			}
 		}
 
 		if err = git(args...); err != nil {
-			return err
+			return APIError("")
 		}
 	}
 
@@ -430,7 +434,7 @@ func handleJob(job *Job, trace io.Writer) error {
 		}
 
 		if err = git("checkout", target); err != nil {
-			return err
+			return APIError("")
 		}
 
 		var cmd = exec.Command("git", "merge", origin+sourceName)
@@ -448,7 +452,7 @@ func handleJob(job *Job, trace io.Writer) error {
 		}
 
 	} else if err = git("checkout", job.GitInfo.Sha); err != nil {
-		return err
+		return APIError("")
 	}
 
 	if !found {
