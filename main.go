@@ -80,6 +80,7 @@ type APIError string
 
 const refsRemotes = "refs/remotes/"
 const origin = "origin/"
+const endpoint = "https://gitlab.com/api/v4"
 
 var config Config
 var client http.Client
@@ -216,7 +217,7 @@ func registerRunner(homeDir string) {
 	client.Timeout = time.Second * 5
 
 	var res *http.Response
-	res, err = client.PostForm("https://gitlab.com/api/v4/runners", url.Values{"token": []string{token}})
+	res, err = client.PostForm(endpoint+"/runners", url.Values{"token": []string{token}})
 	if err != nil {
 		printErr(err.Error())
 	}
@@ -253,7 +254,7 @@ func requestJob(job *Job, token string) *Job {
 		return job
 	}
 
-	var res, err = client.PostForm("https://gitlab.com/api/v4/jobs/request", url.Values{"info[features][refspecs]": []string{"true"}, "info[features][return_exit_code]": []string{"true"}, "token": []string{token}})
+	var res, err = client.PostForm(endpoint+"/jobs/request", url.Values{"info[features][refspecs]": []string{"true"}, "info[features][return_exit_code]": []string{"true"}, "token": []string{token}})
 	if err != nil {
 		printErr(err.Error())
 	}
@@ -296,7 +297,7 @@ func updateJob(state *State) {
 	}
 
 	var req *http.Request
-	req, err = http.NewRequest(http.MethodPut, "https://gitlab.com/api/v4/jobs/"+jobID, bytes.NewReader(enc))
+	req, err = http.NewRequest(http.MethodPut, endpoint+"/jobs/"+jobID, bytes.NewReader(enc))
 	if err != nil {
 		printErr(err.Error())
 	}
@@ -315,7 +316,7 @@ func updateJob(state *State) {
 
 func sendTrace(trace io.Reader) bool {
 
-	var req, err = http.NewRequest(http.MethodPatch, "https://gitlab.com/api/v4/jobs/"+jobID+"/trace", trace)
+	var req, err = http.NewRequest(http.MethodPatch, endpoint+"/jobs/"+jobID+"/trace", trace)
 	if err != nil {
 		printErr(err.Error())
 	}
