@@ -212,7 +212,7 @@ func registerRunner(homeDir string) {
 	config.WorkDir = homeDir + "/.ci"
 
 	config.DoMerge = true
-	config.Jobs = []ConfigJob{{JobName: "test-job", BeforeScript: []string{}, Script: []string{}, AfterScript: []string{}}}
+	config.Jobs = []ConfigJob{{JobName: "test-job", Script: []string{"echo \"Hello from CI\""}}}
 
 	client.Timeout = time.Second * 5
 
