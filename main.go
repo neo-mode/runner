@@ -22,9 +22,10 @@ type Config struct {
 	Shell   string
 	WorkDir string
 
-	DoMerge    bool
-	Protection bool
-	Env        map[string]string
+	SavePassedJobs bool
+	DoMerge        bool
+	Protection     bool
+	Env            map[string]string
 
 	Jobs []ConfigJob
 }
@@ -53,9 +54,10 @@ type JobInfo struct {
 }
 
 type GitInfo struct {
-	RepoURL  string `json:"repo_url"`
-	Sha      string
-	Refspecs []string
+	RepoURL string `json:"repo_url"`
+	Ref     string
+	Sha     string
+	RefType string `json:"ref_type"`
 }
 
 type Variable struct {
@@ -79,6 +81,7 @@ type State struct {
 type APIError string
 
 const refsRemotes = "refs/remotes/"
+const refsTags = "refs/tags/"
 const origin = "origin/"
 const endpoint = "https://gitlab.com/api/v4"
 
@@ -368,8 +371,9 @@ func handleJob(job *Job, trace io.Writer) error {
 		return err
 	}
 
+	var ref = job.GitInfo.Ref
 	var targetName, sourceName, oldTarget, mergeID string
-	var isMerge = config.DoMerge
+	var isMerge = config.DoMerge && len(ref) >= 20 && ref[:20] == "refs/merge-requests/"
 
 	for _, val := range job.Variables {
 
@@ -390,10 +394,6 @@ func handleJob(job *Job, trace io.Writer) error {
 		}
 	}
 
-	if isMerge && targetName == "" {
-		isMerge = false
-	}
-
 	if err == nil {
 
 		if err = git("clone", job.GitInfo.RepoURL, "."); err != nil {
@@ -410,13 +410,19 @@ func handleJob(job *Job, trace io.Writer) error {
 
 		} else {
 
-			args = make([]string, len(job.GitInfo.Refspecs)+2)
-			args[0] = "fetch"
-			args[1] = job.GitInfo.RepoURL
+			var folder string
+			switch job.GitInfo.RefType {
+			case "branch":
+				folder = refsRemotes
 
-			for key, val := range job.GitInfo.Refspecs {
-				args[key+2] = val
+			case "tag":
+				folder = refsTags
+
+			default:
+				return APIError("")
 			}
+
+			args = []string{"fetch", job.GitInfo.RepoURL, "+" + ref + ":" + folder + ref}
 		}
 
 		if err = git(args...); err != nil {
@@ -486,6 +492,9 @@ func handleJob(job *Job, trace io.Writer) error {
 
 	if isMerge && err == nil {
 		setMergedTarget(targetName, mergeID)
+		if config.SavePassedJobs {
+			savePassedJob(mergeID)
+		}
 	}
 
 	return err
@@ -504,6 +513,26 @@ func handleScript(script []string, trace io.Writer) error {
 	cmd.Stderr = trace
 	cmd.Dir = projDir
 	return cmd.Run()
+}
+
+func savePassedJob(mergeID string) error {
+
+	var err error
+	var target = config.WorkDir + "/saved-jobs/" + projID
+	if err = os.MkdirAll(target, 0755); err != nil {
+		return err
+	}
+
+	var f *os.File
+	f, err = os.OpenFile(target+"/"+mergeID, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+
+	f.WriteString(jobID + "\n")
+	f.Close()
+
+	return nil
 }
 
 func getTarget(target string) string {
