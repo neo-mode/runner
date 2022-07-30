@@ -120,8 +120,8 @@ func main() {
 	client.Timeout = time.Second * config.ConnectionTimeout
 
 	var job *Job
-
 	f, _ = os.Open(config.WorkDir + "/job.json")
+
 	if f != nil {
 		job = new(Job)
 		err = json.NewDecoder(f).Decode(job)
